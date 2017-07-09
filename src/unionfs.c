@@ -41,6 +41,7 @@ static struct fuse_opt unionfs_opts[] = {
 	FUSE_OPT_KEY("max_files=%s", KEY_MAX_FILES),
 	FUSE_OPT_KEY("noinitgroups", KEY_NOINITGROUPS),
 	FUSE_OPT_KEY("relaxed_permissions", KEY_RELAXED_PERMISSIONS),
+	FUSE_OPT_KEY("fake_devices", KEY_FAKE_DEVICES),
 	FUSE_OPT_KEY("statfs_omit_ro", KEY_STATFS_OMIT_RO),
 	FUSE_OPT_KEY("--version", KEY_VERSION),
 	FUSE_OPT_KEY("-V", KEY_VERSION),

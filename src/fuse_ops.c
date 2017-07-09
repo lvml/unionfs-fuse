@@ -187,6 +187,16 @@ static int unionfs_getattr(const char *path, struct stat *stbuf) {
 	 */
 	if (S_ISDIR(stbuf->st_mode)) stbuf->st_nlink = 1;
 
+	/* check whether the user wants to report and handle device files
+	 *  as if they were regular files
+	 */
+	if (   uopt.fake_devices 
+	    && (S_ISCHR(stbuf->st_mode) || S_ISBLK(stbuf->st_mode))
+		) {
+		stbuf->st_rdev = 0;
+		stbuf->st_mode = (stbuf->st_mode & (~S_IFMT)) | S_IFREG;
+	}
+	
 	RETURN(0);
 }
 
@@ -377,6 +387,28 @@ static int unionfs_open(const char *path, struct fuse_file_info *fi) {
 
 	char p[PATHLEN_MAX];
 	if (BUILD_PATH(p, uopt.branches[i].path, path)) RETURN(-ENAMETOOLONG);
+
+	/* if the user wants us to open a device file
+	 * as if it was a regular file, we need to take
+	 * care that data is directly read/written and 
+	 * that no attempts on caching/seeking are made 
+	 */
+	if (uopt.fake_devices) {
+		
+		struct stat statbuf;
+		
+		int res = lstat(p, &statbuf);
+		if (res == -1) RETURN(-errno);
+		
+	   if (statbuf.st_size == 0 || S_ISCHR(statbuf.st_mode) || S_ISBLK(statbuf.st_mode)) {
+			/* we do not care here that exec() is reported not to
+			 * work with fi->direct_io = 1, as exec() of a device
+			 * file or a zero-sized file sounds implausible, anyway
+			 */
+			fi->direct_io = 1; 
+			fi->nonseekable = 1;
+		}
+	}
 
 	int fd = open(p, fi->flags);
 	if (fd == -1) RETURN(-errno);
