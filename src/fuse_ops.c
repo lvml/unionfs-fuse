@@ -400,7 +400,7 @@ static int unionfs_open(const char *path, struct fuse_file_info *fi) {
 		int res = lstat(p, &statbuf);
 		if (res == -1) RETURN(-errno);
 		
-	   if (statbuf.st_size == 0 || S_ISCHR(statbuf.st_mode) || S_ISBLK(statbuf.st_mode)) {
+		if (statbuf.st_size == 0 || S_ISCHR(statbuf.st_mode) || S_ISBLK(statbuf.st_mode)) {
 			/* we do not care here that exec() is reported not to
 			 * work with fi->direct_io = 1, as exec() of a device
 			 * file or a zero-sized file sounds implausible, anyway
