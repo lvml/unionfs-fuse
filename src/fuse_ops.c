@@ -270,19 +270,98 @@ static int unionfs_link(const char *from, const char *to) {
 	RETURN(0);
 }
 
+static const char * ioctl_direction_names[4] = {
+	"none",
+	"write",
+	"read",
+	"read/write"
+};
+
+
 #if FUSE_VERSION >= 28
+
+/* includes required for ioctl parameter knowledge: */
+#include <termios.h>
+
 static int unionfs_ioctl(const char *path, int cmd, void *arg, struct fuse_file_info *fi, unsigned int flags, void *data) {
 	(void) path;
 	(void) arg; // avoid compiler warning
 	(void) fi;  // avoid compiler warning
 
-	DBG("got ioctl: %d\n", cmd);
-
+	DBG("got ioctl: path=%s cmd=%d (direction=%s, type=%d, nr=%d, size=%d) arg=%p, flags=%d, data=%p \n",
+	    path, cmd, ioctl_direction_names[_IOC_DIR(cmd)], _IOC_TYPE(cmd), _IOC_NR(cmd), _IOC_SIZE(cmd), arg, flags, data);
+	
+	
 #ifdef FUSE_IOCTL_COMPAT // 32bit-mode within 64-bit
 	if (flags & FUSE_IOCTL_COMPAT)
 		return -ENOSYS;
 #endif
-
+	
+	if (uopt.fake_devices) {
+		
+		/* we can process ioctl's from the accessing process only
+		 * if we can read its memory (via /proc/<pid>/mem)
+		 */
+		
+		struct fuse_context *ctx = fuse_get_context();
+		
+		char proc_pid_mem_name[PATHLEN_MAX];
+		snprintf(proc_pid_mem_name, PATHLEN_MAX, "/proc/%d/mem", ctx->pid);
+		
+		int proc_pid_mem_fd = open(proc_pid_mem_name, O_RDWR);
+		if (proc_pid_mem_fd == -1) {
+			DBG("cannot open %s to process ioctl %d\n", proc_pid_mem_name, cmd);
+			return -EFAULT;
+		}
+		
+		int res = -ENOSYS;
+		
+		switch (cmd) {
+		
+		case TCGETS: {
+			off_t  addr_par_1 = (off_t)arg;
+			size_t size_par_1 = sizeof(struct termios);
+			char ioctl_par_1[size_par_1] __attribute__ ((aligned (64)));
+			
+			res = ioctl(fi->fh, cmd, &ioctl_par_1);
+			
+			if (size_par_1 != pwrite(proc_pid_mem_fd, &ioctl_par_1, size_par_1, addr_par_1)) {
+				DBG("cannot pwrite %zd bytes to %p in %s for ioctl %d, reason: %s\n",
+				    size_par_1, arg, proc_pid_mem_name, cmd, strerror(errno));
+				res = -EFAULT;
+				break;
+			}
+			
+			break;
+		}
+		
+		case TCSETS: {
+			off_t  addr_par_1 = (off_t)arg;
+			size_t size_par_1 = sizeof(struct termios);
+			char ioctl_par_1[size_par_1] __attribute__ ((aligned (64)));
+			
+			if (size_par_1 != pread(proc_pid_mem_fd, &ioctl_par_1, size_par_1, addr_par_1)) {
+				res = -EFAULT;
+				DBG("cannot pread %zd bytes from %p in %s for ioctl %d, reason: %s\n",
+				    size_par_1, arg, proc_pid_mem_name, cmd, strerror(errno));
+				break;
+			}
+			
+			res = ioctl(fi->fh, cmd, &ioctl_par_1);
+			break;
+		}
+		
+		default:
+			/* IOCTL "cmd" is not yet supported here */
+			DBG("ioctl %d is not yet supported - feel free to enhance unionfs-fuse/src/fuse_ops.c\n", cmd); 
+		}
+		
+		close(proc_pid_mem_fd);
+		
+		return res;	
+	}
+	
+	
 	switch (cmd) {
 	case UNIONFS_ONOFF_DEBUG: {
 		int on_off = *((int *) data);
