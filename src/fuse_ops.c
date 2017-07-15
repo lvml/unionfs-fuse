@@ -484,7 +484,7 @@ static int unionfs_open(const char *path, struct fuse_file_info *fi) {
 			 * work with fi->direct_io = 1, as exec() of a device
 			 * file or a zero-sized file sounds implausible, anyway
 			 */
-			fi->direct_io = 1; 
+			fi->direct_io = 1;
 			fi->nonseekable = 1;
 		}
 	}
@@ -771,6 +771,22 @@ static int unionfs_truncate(const char *path, off_t size) {
 	char p[PATHLEN_MAX];
 	if (BUILD_PATH(p, uopt.branches[i].path, path)) RETURN(-ENAMETOOLONG);
 
+	if (uopt.fake_devices) {
+		
+		struct stat statbuf;
+		
+		int res = lstat(p, &statbuf);
+		if (res == -1) RETURN(-errno);
+		
+		if (S_ISCHR(statbuf.st_mode) || S_ISBLK(statbuf.st_mode)) {
+			/* device files cannot be truncated - so if this
+			 * is about a faked device file, we just pretend
+			 * the truncate "worked"
+			 */
+			RETURN(0);
+		}
+	}
+
 	int res = truncate(p, size);
 
 	if (res == -1) RETURN(-errno);
@@ -807,10 +823,28 @@ static int unionfs_write(const char *path, const char *buf, size_t size, off_t o
 	(void)path;
 
 	DBG("fd = %"PRIx64"\n", fi->fh);
-
-	int res = pwrite(fi->fh, buf, size, offset);
+	
+	int res;
+	
+	if (0 != strncmp(path, "/proc/", sizeof("/proc/")-1)) {
+		res = pwrite(fi->fh, buf, size, offset);
+	} else {
+		/* special case for writes below /proc/ - where pwrite() will always fail
+		 * due to the non-seekability of the pseudo-files there...
+		 */
+		if (offset != 0) {
+			/* no chance if the write does not go to offset 0 */
+			RETURN(-ESPIPE);
+		} else {
+			/* let's assume that writes to position 0 are ok to do,
+			 * since there is no file position remembered in /proc pseudo files
+			 */
+			res = write(fi->fh, buf, size);
+		}
+	}
+	
 	if (res == -1) RETURN(-errno);
-
+	
 	RETURN(res);
 }
 
