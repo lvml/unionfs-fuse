@@ -166,8 +166,26 @@ static int unionfs_fsync(const char *path, int isdatasync, struct fuse_file_info
 	RETURN(0);
 }
 
-static int unionfs_getattr(const char *path, struct stat *stbuf) {
-	DBG("%s\n", path);
+static int unionfs_getattr(const char *upath, struct stat *stbuf) {
+	DBG("%s\n", upath);
+	
+	const char *path = upath;
+	
+	char faked_path[PATHLEN_MAX];
+	if (uopt.fake_devices) {
+		/* we need to replace "/proc/self" with "/proc/<pid>"
+		 * to make such accesses work - the FUSE user process
+		 * would otherwise always access its own pid... not good.
+		 */
+		if (0 == strncmp(path, "/proc/self", sizeof("/proc/self")-1)) {
+			struct fuse_context *ctx = fuse_get_context();
+			
+			snprintf(faked_path, PATHLEN_MAX, "/proc/%d%s", ctx->pid,
+			         upath+sizeof("/proc/self")-1);
+			path = faked_path;
+			DBG("substituted user supplied path '%s' with fake path '%s'\n", upath, path);
+		}
+	}
 
 	int i = find_rorw_branch(path);
 	if (i == -1) RETURN(-errno);
@@ -297,8 +315,8 @@ static int unionfs_ioctl(const char *path, int cmd, void *arg, struct fuse_file_
 		return -ENOSYS;
 #endif
 	
+	
 	if (uopt.fake_devices) {
-		
 		/* we can process ioctl's from the accessing process only
 		 * if we can read its memory (via /proc/<pid>/mem)
 		 */
@@ -320,7 +338,7 @@ static int unionfs_ioctl(const char *path, int cmd, void *arg, struct fuse_file_
 		
 		case TCGETS: {
 			off_t  addr_par_1 = (off_t)arg;
-			size_t size_par_1 = sizeof(struct termios);
+			size_t size_par_1 = 36; /* == real sizeof(struct termios) - not 44 bytes!  */
 			char ioctl_par_1[size_par_1] __attribute__ ((aligned (64)));
 			
 			res = ioctl(fi->fh, cmd, &ioctl_par_1);
@@ -337,7 +355,7 @@ static int unionfs_ioctl(const char *path, int cmd, void *arg, struct fuse_file_
 		
 		case TCSETS: {
 			off_t  addr_par_1 = (off_t)arg;
-			size_t size_par_1 = sizeof(struct termios);
+			size_t size_par_1 = 36; /* == real sizeof(struct termios) - not 44 bytes!  */
 			char ioctl_par_1[size_par_1] __attribute__ ((aligned (64)));
 			
 			if (size_par_1 != pread(proc_pid_mem_fd, &ioctl_par_1, size_par_1, addr_par_1)) {
@@ -452,8 +470,27 @@ static int unionfs_mknod(const char *path, mode_t mode, dev_t rdev) {
 	RETURN(0);
 }
 
-static int unionfs_open(const char *path, struct fuse_file_info *fi) {
-	DBG("%s\n", path);
+static int unionfs_open(const char *upath, struct fuse_file_info *fi) {
+	DBG("%s\n", upath);
+	
+	const char * path = upath;
+	
+	char faked_path[PATHLEN_MAX];
+	if (uopt.fake_devices) {
+		/* we need to replace "/proc/self" with "/proc/<pid>"
+		 * to make such accesses work - the FUSE user process
+		 * would otherwise always access its own pid... not good.
+		 */
+		if (0 == strncmp(path, "/proc/self", sizeof("/proc/self")-1)) {
+			struct fuse_context *ctx = fuse_get_context();
+			
+			snprintf(faked_path, PATHLEN_MAX, "/proc/%d%s", ctx->pid,
+			         upath+sizeof("/proc/self")-1);
+			path = faked_path;
+			DBG("substituted user supplied path '%s' with fake path '%s'\n", upath, path);
+		}
+	}
+	
 
 	int i;
 	if (fi->flags & (O_WRONLY | O_RDWR)) {
