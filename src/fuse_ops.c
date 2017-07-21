@@ -299,7 +299,7 @@ static const char * ioctl_direction_names[4] = {
 #if FUSE_VERSION >= 28
 
 /* includes required for ioctl parameter knowledge: */
-#include <termios.h>
+#include <sys/ioctl.h>
 
 static int unionfs_ioctl(const char *path, int cmd, void *arg, struct fuse_file_info *fi, unsigned int flags, void *data) {
 	(void) path;
@@ -338,7 +338,7 @@ static int unionfs_ioctl(const char *path, int cmd, void *arg, struct fuse_file_
 		
 		case TCGETS: {
 			off_t  addr_par_1 = (off_t)arg;
-			size_t size_par_1 = 36; /* == real sizeof(struct termios) - not 44 bytes!  */
+			const size_t size_par_1 = 36; /* == real sizeof(struct termios) - not 44 bytes!  */
 			char ioctl_par_1[size_par_1] __attribute__ ((aligned (64)));
 			
 			res = ioctl(fi->fh, cmd, &ioctl_par_1);
@@ -355,7 +355,7 @@ static int unionfs_ioctl(const char *path, int cmd, void *arg, struct fuse_file_
 		
 		case TCSETS: {
 			off_t  addr_par_1 = (off_t)arg;
-			size_t size_par_1 = 36; /* == real sizeof(struct termios) - not 44 bytes!  */
+			const size_t size_par_1 = 36; /* == real sizeof(struct termios) - not 44 bytes!  */
 			char ioctl_par_1[size_par_1] __attribute__ ((aligned (64)));
 			
 			if (size_par_1 != pread(proc_pid_mem_fd, &ioctl_par_1, size_par_1, addr_par_1)) {
@@ -366,6 +366,71 @@ static int unionfs_ioctl(const char *path, int cmd, void *arg, struct fuse_file_
 			}
 			
 			res = ioctl(fi->fh, cmd, &ioctl_par_1);
+			break;
+		}
+		
+		case SIOCGIFHWADDR: {
+			off_t  addr_par_1 = (off_t)arg;
+			const size_t size_par_1 = 40;  /* sizeof(struct ifreq) */
+			char ioctl_par_1[size_par_1] __attribute__ ((aligned (64)));
+			
+			if (size_par_1 != pread(proc_pid_mem_fd, &ioctl_par_1, size_par_1, addr_par_1)) {
+				res = -EFAULT;
+				DBG("cannot pread %zd bytes from %p in %s for ioctl %d, reason: %s\n",
+				    size_par_1, arg, proc_pid_mem_name, cmd, strerror(errno));
+				break;
+			}
+			
+			res = ioctl(fi->fh, cmd, &ioctl_par_1);
+			
+			if (size_par_1 != pwrite(proc_pid_mem_fd, &ioctl_par_1, size_par_1, addr_par_1)) {
+				DBG("cannot pwrite %zd bytes to %p in %s for ioctl %d, reason: %s\n",
+				    size_par_1, arg, proc_pid_mem_name, cmd, strerror(errno));
+				res = -EFAULT;
+				break;
+			}
+			
+			break;
+		}
+
+		case FIONREAD: {
+			off_t  addr_par_1 = (off_t)arg;
+			const size_t size_par_1 = sizeof(int);
+			char ioctl_par_1[size_par_1] __attribute__ ((aligned (64)));
+			
+			res = ioctl(fi->fh, cmd, &ioctl_par_1);
+			
+			if (size_par_1 != pwrite(proc_pid_mem_fd, &ioctl_par_1, size_par_1, addr_par_1)) {
+				DBG("cannot pwrite %zd bytes to %p in %s for ioctl %d, reason: %s\n",
+				    size_par_1, arg, proc_pid_mem_name, cmd, strerror(errno));
+				res = -EFAULT;
+				break;
+			}
+			
+			break;
+		}
+
+		case TIOCMBIS:
+		case TIOCMBIC: {
+			off_t  addr_par_1 = (off_t)arg;
+			const size_t size_par_1 = sizeof(int);
+			char ioctl_par_1[size_par_1] __attribute__ ((aligned (64)));
+			
+			if (size_par_1 != pread(proc_pid_mem_fd, &ioctl_par_1, size_par_1, addr_par_1)) {
+				res = -EFAULT;
+				DBG("cannot pread %zd bytes from %p in %s for ioctl %d, reason: %s\n",
+				    size_par_1, arg, proc_pid_mem_name, cmd, strerror(errno));
+				break;
+			}
+			
+			res = ioctl(fi->fh, cmd, &ioctl_par_1);
+			break;
+		}
+
+		case TCFLSH:
+		case TCSBRK: {
+			const int i = (int)((long long)arg);			
+			res = ioctl(fi->fh, cmd, i);
 			break;
 		}
 		
