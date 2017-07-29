@@ -7,6 +7,8 @@
 #ifndef UNIONFS_H
 #define UNIONFS_H
 
+#include <pthread.h>
+
 #define PATHLEN_MAX 1024
 #define HIDETAG "_HIDDEN~"
 
@@ -28,5 +30,24 @@ typedef struct {
 } branch_entry_t;
 
 extern struct fuse_operations unionfs_oper;
+
+
+// poll_observer_function is run as a thread that is used to observe files for poll() notifications 
+extern void *poll_observer_function(void *data);
+
+// mutex to protectect the observer-related data structures below
+extern pthread_mutex_t poll_observer_mutex; 
+
+// file descriptors of a pipe the poll_observer thread (also) waits for,
+// and the unionfs main thread writes to wake up the poll_observer when
+// another call to unionfs_poll indicates more/changed work to do
+extern int poll_observer_pipe[2]; 
+
+// if file descriptor X is to be observed for poll() notifications,
+//  poll_handle[X] will contain a fuse_pollhandle * for this - or a zero-pointer if not.
+extern struct fuse_pollhandle ** poll_handles;
+extern short * poll_revents; // what to poll() for, also used to convey result, same size as poll_handles
+extern unsigned int poll_handles_size; // poll_handles is dynamically enlarged if required for a higher fd
+
 
 #endif

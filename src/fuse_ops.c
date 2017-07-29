@@ -32,6 +32,7 @@
 #include <sys/types.h>
 #include <sys/time.h>
 #include <inttypes.h>
+#include <pthread.h>
 
 #ifdef linux
 	#include <sys/vfs.h>
@@ -650,11 +651,265 @@ static int unionfs_open(const char *upath, struct fuse_file_info *fi) {
 	RETURN(0);
 }
 
+
+// mutex to protectect the observer-related data structures below
+pthread_mutex_t poll_observer_mutex; 
+
+// file descriptors of a pipe the poll_observer thread (also) waits for,
+// and the unionfs main thread writes to wake up the poll_observer when
+// another call to unionfs_poll indicates more/changed work to do
+int poll_observer_pipe[2]; 
+
+// if file descriptor X is to be observed for poll() notifications,
+//  poll_handle[X] will contain a fuse_pollhandle * for this - or a zero-pointer if not.
+struct fuse_pollhandle ** poll_handles;
+short * poll_revents; // what to poll() for, also used to convey result, same size as poll_handles
+unsigned int poll_handles_size; // poll_handles is dynamically enlarged if required for a higher fd
+
+static int observer_lock(void) {
+	int error_number = 0;
+	char error_msg_buf[4096];
+	
+	error_number = pthread_mutex_lock(&poll_observer_mutex);
+	if (error_number) {
+		if (0 == strerror_r(error_number, error_msg_buf, sizeof(error_msg_buf))) {
+			fprintf(stderr, "observer_lock: pthread_mutex_lock failed: %s\n", error_msg_buf);
+		}
+		return -1;
+	}
+	return 0;
+}
+
+static int observer_unlock(void) {
+	int error_number = 0;
+	char error_msg_buf[4096];
+	
+	error_number = pthread_mutex_unlock(&poll_observer_mutex);
+	if (error_number) {
+		if (0 == strerror_r(error_number, error_msg_buf, sizeof(error_msg_buf))) {
+			fprintf(stderr, "observer_lock: pthread_mutex_lock failed: %s\n", error_msg_buf);
+		}
+		return -1;
+	}
+	return 0;
+}
+
+#include <poll.h>
+
+static int unionfs_poll(const char *path, struct fuse_file_info *fi,
+                     struct fuse_pollhandle *ph, unsigned *reventsp)
+{
+	if (observer_lock()) {
+		RETURN(-ENOSYS);
+	}
+	
+	// we need to make sure that our data structures are big enough to 
+	// contain the file descriptor fi->fh
+	if (fi->fh >= poll_handles_size) {
+		// nope, need to enlarge the structures
+		
+		size_t new_size = fi->fh + 8; // the "+8" is just meant to reduce the number of re-allocations / copies
+		
+		DBG("resizing poll_handles from %u to %zd\n", poll_handles_size, new_size);
+		
+		struct fuse_pollhandle ** new_poll_handles = malloc(new_size * sizeof(struct fuse_pollhandle *));
+		if (new_poll_handles == 0) {
+			fprintf(stderr, "unionfs_poll: malloc(%zd) failed\n", new_size * sizeof(struct fuse_pollhandle *));
+			observer_unlock();			
+			RETURN(-ENOSYS);
+		}
+		if (poll_handles != 0) {
+			memcpy(new_poll_handles, poll_handles, poll_handles_size * sizeof(struct fuse_pollhandle *));
+			free(poll_handles);
+		}
+		memset(((char *)new_poll_handles) + poll_handles_size * sizeof(struct fuse_pollhandle *),
+		       0, (new_size - poll_handles_size) * sizeof(struct fuse_pollhandle *));
+		poll_handles = new_poll_handles;
+		
+		short * new_poll_revents = malloc(new_size * sizeof(short));
+		if (new_poll_revents == 0) {
+			fprintf(stderr, "unionfs_poll: malloc(%zd) failed\n", new_size * sizeof(short));
+			observer_unlock();			
+			RETURN(-ENOSYS);
+		}
+		if (poll_revents != 0) {
+			memcpy(new_poll_revents, poll_revents, poll_handles_size * sizeof(short));
+			free(poll_revents);
+		}
+		memset(((char *)new_poll_revents) + poll_handles_size * sizeof(short),
+		       0, (new_size - poll_handles_size) * sizeof(short));
+		poll_revents = new_poll_revents;
+		
+		poll_handles_size = new_size;
+	}
+	
+	if (ph != NULL) {
+		// before storing the fuse_pollhandle for later notification use
+		// by the poll_observer_function, we need to take care that any
+		// pre-existing fuse_pollhandle for the same file descriptor
+		// is properly destroyed
+		if (poll_handles[fi->fh] != 0) {
+			fuse_pollhandle_destroy(poll_handles[fi->fh]);
+		}
+	}
+	poll_handles[fi->fh] = ph;		
+	
+	unsigned int events_last_returned = poll_revents[fi->fh];
+	unsigned int events_last_asked = *reventsp;
+	
+	poll_revents[fi->fh] = events_last_asked; // in case that reventsp is an input parameter
+	*reventsp = events_last_returned;         // in case that reventsp is an output parameter
+	
+	DBG("fd = %"PRIx64" path=%s ph=%p events_last_asked=%ud events_last_returned=%ud\n",
+	    fi->fh, path, ph, events_last_asked, events_last_returned);
+	
+	// make the poll_observer thread wake up from its own poll() call,
+	// to consider any changes we did to poll_handles and poll_revents
+	char dummybyte = 0x55;
+	write(poll_observer_pipe[1], &dummybyte, 1);
+	
+	if (observer_unlock()) {
+		RETURN(-ENOSYS);
+	}
+	
+	return 0;
+}
+
+void *poll_observer_function(void *data)
+{
+	nfds_t pfds_array_size = 0;
+	struct pollfd * pfds = 0;
+	
+	for (;;) {
+		
+		// obtain the mutex for the observer related data structures
+		// to avoid races with unionfs_poll() activity 
+		if (observer_lock()) {
+			return ((void *)1);
+		}
+		
+		// compute the number of pollfd structures we will need
+		// for our next call to poll()
+		nfds_t new_pfds_size = 1 + poll_handles_size;
+		
+		if (new_pfds_size != pfds_array_size) {
+			
+			DBG("changing pfds_array_size from %lu to %lu\n", pfds_array_size, new_pfds_size);
+			
+			// we need a differently sized pollfd array than before
+			if (pfds != 0) {
+				// get rid of now obsolete pollfd array
+				free(pfds);
+				pfds = 0;
+			}
+			pfds = malloc(new_pfds_size * sizeof(struct pollfd));
+			if (pfds == 0) {
+				fprintf(stderr, "poll_observer_function: malloc(%zd) failed\n", new_pfds_size * sizeof(struct pollfd));
+				return ((void *)1);
+			}
+			
+			// the first pollfd structure is used to wait for read()ability of
+			// the pipe to us
+			pfds[0].fd = poll_observer_pipe[0];
+			pfds[0].events = POLLIN;
+			pfds[0].revents = 0;
+			
+			pfds_array_size = new_pfds_size;
+		}
+		
+		// set or update pfds[1 .. new_pfds_size-1]
+		
+		// pfds[1 .. new_pfds_size-1] are used to (potentially) poll for any
+		// file descriptor the unionfs clients want to poll() for -
+		// notice the index into poll_handles[] is directly the file descriptor value
+		nfds_t i;
+		for (i = 1; i < new_pfds_size; i++) {
+			if (poll_handles[i-1] == 0) {
+				// ok, so no polling for file descriptor (i-1)
+				pfds[i].fd = -1; // according to the poll() man-page, this tells poll() to ignore this pollfd
+			} else {
+				pfds[i].fd = i-1;
+			}
+			pfds[i].events = poll_revents[i-1];
+			pfds[i].revents = 0;
+		}
+		
+		// at this point, we have a properly sized and initialized "pfds" array
+		
+		// release the mutex for the observer related data structures
+		if (observer_unlock()) {
+			return ((void *)1);
+		}
+		
+		int res = poll(pfds, pfds_array_size, 100000);
+		DBG("observer: poll returned, res=%d, pfds[0].revents=%ud\n", res, pfds[0].revents);
+		if (res < 0) {
+			fprintf(stderr, "poll_observer_function: poll() failed: %s\n", strerror(errno));
+			return ((void *)1);
+		}
+		
+		if (pfds[0].events | POLLIN) {
+			// observer thread was sent some dummy data to wake it up,
+			// just read stuff (non-blocking) from the pipe to empty it
+			char dummy_bytes[16];
+			read(poll_observer_pipe[0], dummy_bytes, 16);
+		}
+		
+		if (observer_lock()) {
+			return ((void *)1);
+		}
+				
+		// iterate over all pollfd structures to see if action is to be taken
+		for (i = 1; i < pfds_array_size; i++) {
+			if (poll_handles[i-1] == 0) {
+				// their either was or is no interest in polling fd = i-1 now
+				pfds[i].fd = -1;
+			
+			} else {
+				// is an event signaled for the stake holder?	
+				if (pfds[i].revents != 0) {
+					poll_revents[i-1] = pfds[i].revents;
+					
+					DBG("observer: notifying revents=%d for fd=%lu\n", poll_revents[i-1], i-1);
+					fuse_notify_poll(poll_handles[i-1]);
+					fuse_pollhandle_destroy(poll_handles[i-1]);
+					
+					poll_handles[i-1] = 0;
+					
+					// after notification, we don't need to keep polling for the same event
+					pfds[i].fd = -1;
+				}
+			}
+		}
+		
+		if (observer_unlock()) {
+			return ((void *)1);
+		}
+	}
+	
+	// will never reach this:
+	return NULL;
+}
+
 static int unionfs_read(const char *path, char *buf, size_t size, off_t offset, struct fuse_file_info *fi) {
-	DBG("fd = %"PRIx64"\n", fi->fh);
-
-	int res = pread(fi->fh, buf, size, offset);
-
+	DBG("fd = %"PRIx64" path=%s size=%zd offset=%zd fi->nonseekable=%d \n", fi->fh, path, size, offset, fi->nonseekable);
+	
+	int res;
+	
+	if (uopt.fake_devices) {
+		if (lseek(fi->fh, offset, SEEK_SET) < 0) {
+			/* for -o fake_devices, we are ok that some files are just not seekable */
+			if (errno != ESPIPE) {
+				RETURN(-errno);
+			}
+		}
+		
+		res = read(fi->fh, buf, size);	
+	} else {
+		/* without -o fake_devices, seekability is mandatory */
+		res = pread(fi->fh, buf, size, offset);
+	}
+	
 	if (res == -1) RETURN(-errno);
 
 	RETURN(res);
@@ -680,7 +935,26 @@ static int unionfs_readlink(const char *path, char *buf, size_t size) {
 
 static int unionfs_release(const char *path, struct fuse_file_info *fi) {
 	DBG("fd = %"PRIx64"\n", fi->fh);
-
+	
+	// we need to remove a possible registered stake in poll() events
+	if (observer_lock()) {
+		return -ENOSYS;
+	}
+	if (fi->fh < poll_handles_size) {
+		if (poll_handles[fi->fh] != 0) {
+			fuse_pollhandle_destroy(poll_handles[fi->fh]);
+			poll_handles[fi->fh] = 0;
+			
+			// make the poll_observer thread wake up from its own poll() call
+			char dummybyte = 0x55;
+			write(poll_observer_pipe[1], &dummybyte, 1);
+		}
+	}
+	
+	if (observer_unlock()) {
+		return -ENOSYS;
+	}
+	
 	int res = close(fi->fh);
 	if (res == -1) RETURN(-errno);
 
@@ -965,26 +1239,22 @@ static int unionfs_utimens(const char *path, const struct timespec ts[2]) {
 
 static int unionfs_write(const char *path, const char *buf, size_t size, off_t offset, struct fuse_file_info *fi) {
 	(void)path;
-
-	DBG("fd = %"PRIx64"\n", fi->fh);
+	
+	DBG("fd = %"PRIx64" path=%s size=%zd offset=%zd \n", fi->fh, path, size, offset);
 	
 	int res;
 	
-	if (0 != strncmp(path, "/proc/", sizeof("/proc/")-1)) {
-		res = pwrite(fi->fh, buf, size, offset);
-	} else {
-		/* special case for writes below /proc/ - where pwrite() will always fail
-		 * due to the non-seekability of the pseudo-files there...
-		 */
-		if (offset != 0) {
-			/* no chance if the write does not go to offset 0 */
-			RETURN(-ESPIPE);
-		} else {
-			/* let's assume that writes to position 0 are ok to do,
-			 * since there is no file position remembered in /proc pseudo files
-			 */
-			res = write(fi->fh, buf, size);
+	if (uopt.fake_devices) {
+		if (lseek(fi->fh, offset, SEEK_SET) < 0) {
+			/* for -o fake_devices, we are ok that some files are just not seekable */
+			if (errno != ESPIPE) {
+				RETURN(-errno);
+			}
 		}
+		
+		res = write(fi->fh, buf, size);	
+	} else {
+		res = pwrite(fi->fh, buf, size, offset);
 	}
 	
 	if (res == -1) RETURN(-errno);
@@ -1099,6 +1369,7 @@ struct fuse_operations unionfs_oper = {
 	.mkdir = unionfs_mkdir,
 	.mknod = unionfs_mknod,
 	.open = unionfs_open,
+	.poll = unionfs_poll,
 	.read = unionfs_read,
 	.readlink = unionfs_readlink,
 	.readdir = unionfs_readdir,

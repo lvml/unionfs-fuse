@@ -10,11 +10,15 @@
 *            Bernd Schubert <bernd-schubert@gmx.de>
 */
 
+#define _GNU_SOURCE
+#include <fcntl.h> 
+#include <string.h>
 #include <fuse.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
+#include <pthread.h>
 
 #include "unionfs.h"
 #include "debug.h"
@@ -97,6 +101,50 @@ int main(int argc, char *argv[]) {
 #endif
 
 	umask(0);
+	
+	if (0 != pipe2(poll_observer_pipe, O_NONBLOCK | O_CLOEXEC)) {
+		fprintf(stderr, "pipe2 failed: %s\n", strerror(errno));
+		RETURN(1);
+	}
+	
+	poll_handles = 0;
+	poll_revents = 0;
+	poll_handles_size = 0;
+	
+	pthread_t poll_observer;
+	pthread_attr_t poll_observer_attr;
+	
+	char error_msg_buf[4096];
+	int  error_number;
+	
+	error_number = pthread_mutex_init(&poll_observer_mutex, NULL);
+	if (error_number) {
+		if (0 == strerror_r(error_number, error_msg_buf, sizeof(error_msg_buf))) {
+			fprintf(stderr, "pthread_mutex_init failed: %s\n", error_msg_buf);
+		}
+		RETURN(1);
+	}
+
+	error_number = pthread_attr_init(&poll_observer_attr);
+	if (error_number) {
+		if (0 == strerror_r(error_number, error_msg_buf, sizeof(error_msg_buf))) {
+			fprintf(stderr, "pthread_attr_init failed: %s\n", error_msg_buf);
+		}
+		RETURN(1);
+	}
+	
+	error_number = pthread_create(&poll_observer, &poll_observer_attr, poll_observer_function, NULL);
+	if (error_number) {
+		if (0 == strerror_r(error_number, error_msg_buf, sizeof(error_msg_buf))) {
+			fprintf(stderr, "pthread_create failed: %s\n", error_msg_buf);
+		}
+		RETURN(1);
+	}
+
 	int res = fuse_main(args.argc, args.argv, &unionfs_oper, NULL);
+	
+	pthread_cancel(poll_observer);
+	pthread_join(poll_observer, NULL);
+	
 	RETURN(uopt.doexit ? uopt.retval : res);
 }
