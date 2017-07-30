@@ -143,6 +143,10 @@ int main(int argc, char *argv[]) {
 
 	int res = fuse_main(args.argc, args.argv, &unionfs_oper, NULL);
 	
+        // make the poll_observer thread wake up from its own poll() call
+        char dummybyte = 0x55;
+        write(poll_observer_pipe[1], &dummybyte, 1);
+	
 	pthread_cancel(poll_observer);
 	pthread_join(poll_observer, NULL);
 	

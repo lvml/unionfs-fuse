@@ -754,14 +754,22 @@ static int unionfs_poll(const char *path, struct fuse_file_info *fi,
 	}
 	poll_handles[fi->fh] = ph;		
 	
-	unsigned int events_last_returned = poll_revents[fi->fh];
-	unsigned int events_last_asked = *reventsp;
+	struct pollfd pfd;
+	pfd.fd = fi->fh;
+	pfd.events = POLLIN | POLLOUT;
+	pfd.revents = 0;
+	int pres = poll(&pfd, 1, 0);
 	
-	poll_revents[fi->fh] = events_last_asked; // in case that reventsp is an input parameter
-	*reventsp = events_last_returned;         // in case that reventsp is an output parameter
+	DBG("direct poll for fd=%d %s ph=%p returned res=%d, pfd.revents=%u\n", pfd.fd, path, ph, pres, pfd.revents);
+	if (pres < 0) {
+		fprintf(stderr, "unionfs_poll: poll failed: %s\n", strerror(errno));
+		observer_unlock();			
+		RETURN(-ENOSYS);
+	}
 	
-	DBG("fd = %"PRIx64" path=%s ph=%p events_last_asked=%ud events_last_returned=%ud\n",
-	    fi->fh, path, ph, events_last_asked, events_last_returned);
+	*reventsp = pfd.revents;
+	
+	poll_revents[fi->fh] = (POLLIN | POLLOUT) & (~pfd.revents); // let observer wait for not-yet-events
 	
 	// make the poll_observer thread wake up from its own poll() call,
 	// to consider any changes we did to poll_handles and poll_revents
@@ -823,15 +831,19 @@ void *poll_observer_function(void *data)
 		// file descriptor the unionfs clients want to poll() for -
 		// notice the index into poll_handles[] is directly the file descriptor value
 		nfds_t i;
-		for (i = 1; i < new_pfds_size; i++) {
+		for (i = 1; i < pfds_array_size; i++) {
 			if (poll_handles[i-1] == 0) {
 				// ok, so no polling for file descriptor (i-1)
 				pfds[i].fd = -1; // according to the poll() man-page, this tells poll() to ignore this pollfd
 			} else {
 				pfds[i].fd = i-1;
 			}
+			// only select for events not yet signaled after last unionfs_poll call for the poll_handle
 			pfds[i].events = poll_revents[i-1];
 			pfds[i].revents = 0;
+			if (pfds[i].fd >= 0) {
+				DBG("observer: will poll for fd=%d, events=%d \n", pfds[i].fd, pfds[i].events);
+			}
 		}
 		
 		// at this point, we have a properly sized and initialized "pfds" array
@@ -868,14 +880,12 @@ void *poll_observer_function(void *data)
 			} else {
 				// is an event signaled for the stake holder?	
 				if (pfds[i].revents != 0) {
-					poll_revents[i-1] = pfds[i].revents;
+					// poll_revents[i-1] |= pfds[i].revents;
 					
-					DBG("observer: notifying revents=%d for fd=%lu\n", poll_revents[i-1], i-1);
+					DBG("observer: notifying pm revents=%d for fd=%lu\n", poll_revents[i-1], i-1);
 					fuse_notify_poll(poll_handles[i-1]);
 					fuse_pollhandle_destroy(poll_handles[i-1]);
-					
 					poll_handles[i-1] = 0;
-					
 					// after notification, we don't need to keep polling for the same event
 					pfds[i].fd = -1;
 				}
@@ -899,19 +909,21 @@ static int unionfs_read(const char *path, char *buf, size_t size, off_t offset, 
 	if (uopt.fake_devices) {
 		if (lseek(fi->fh, offset, SEEK_SET) < 0) {
 			/* for -o fake_devices, we are ok that some files are just not seekable */
-			if (errno != ESPIPE) {
+			if (errno == ESPIPE) {
+				res = read(fi->fh, buf, size);
+				if (res < 0) RETURN(-errno);
+				RETURN(res);
+			} else {
 				RETURN(-errno);
 			}
 		}
-		
-		res = read(fi->fh, buf, size);	
-	} else {
-		/* without -o fake_devices, seekability is mandatory */
-		res = pread(fi->fh, buf, size, offset);
+		// if the file is seekable, use pread() to avoid race conditions
 	}
 	
+	res = pread(fi->fh, buf, size, offset);
+	
 	if (res == -1) RETURN(-errno);
-
+	
 	RETURN(res);
 }
 

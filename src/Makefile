@@ -1,5 +1,5 @@
-#CFLAGS += -Wall -fPIC -O2
-CFLAGS += -Wall -fPIC -O0 -ggdb3
+CFLAGS += -Wall -fPIC -O2
+# CFLAGS += -Wall -fPIC -O0 -ggdb3
 CPPFLAGS += $(shell pkg-config --cflags fuse)
 CPPFLAGS += -DFUSE_USE_VERSION=29
 
