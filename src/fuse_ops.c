@@ -302,10 +302,40 @@ static const char * ioctl_direction_names[4] = {
 /* includes required for ioctl parameter knowledge: */
 #include <sys/ioctl.h>
 
+/* only on newer systems, you can find the following stuff in /usr/include/bluetooth/hci.h */
+struct our_hci_conn_list_req {
+	unsigned short dev_id;
+   unsigned short conn_num;
+};
+/* HCI ioctl defines */
+#define HCIDEVUP        _IOW('H', 201, int)
+#define HCIDEVDOWN      _IOW('H', 202, int)
+#define HCIDEVRESET     _IOW('H', 203, int)
+#define HCIDEVRESTAT    _IOW('H', 204, int)
+
+#define HCIGETDEVLIST   _IOR('H', 210, int)
+#define HCIGETDEVINFO   _IOR('H', 211, int)
+#define HCIGETCONNLIST  _IOR('H', 212, int)
+#define HCIGETCONNINFO  _IOR('H', 213, int)
+#define HCIGETAUTHINFO  _IOR('H', 215, int)
+
+#define HCISETRAW       _IOW('H', 220, int)
+#define HCISETSCAN      _IOW('H', 221, int)
+#define HCISETAUTH      _IOW('H', 222, int)
+#define HCISETENCRYPT   _IOW('H', 223, int)
+#define HCISETPTYPE     _IOW('H', 224, int)
+#define HCISETLINKPOL   _IOW('H', 225, int)
+#define HCISETLINKMODE  _IOW('H', 226, int)
+#define HCISETACLMTU    _IOW('H', 227, int)
+#define HCISETSCOMTU    _IOW('H', 228, int)
+
+#define HCIBLOCKADDR    _IOW('H', 230, int)
+#define HCIUNBLOCKADDR  _IOW('H', 231, int)
+
+#define HCIINQUIRY      _IOR('H', 240, int)
+
 static int unionfs_ioctl(const char *path, int cmd, void *arg, struct fuse_file_info *fi, unsigned int flags, void *data) {
 	(void) path;
-	(void) arg; // avoid compiler warning
-	(void) fi;  // avoid compiler warning
 
 	DBG("got ioctl: path=%s cmd=%d (direction=%s, type=%d, nr=%d, size=%d) arg=%p, flags=%d, data=%p \n",
 	    path, cmd, ioctl_direction_names[_IOC_DIR(cmd)], _IOC_TYPE(cmd), _IOC_NR(cmd), _IOC_SIZE(cmd), arg, flags, data);
@@ -334,152 +364,156 @@ static int unionfs_ioctl(const char *path, int cmd, void *arg, struct fuse_file_
 		}
 		
 		int res = -ENOSYS;
-		
-		switch (cmd) {
-		
-		case TCGETS: {
-			off_t  addr_par_1 = (off_t)arg;
-			const size_t size_par_1 = 36; /* == real sizeof(struct termios) - not 44 bytes!  */
-			char ioctl_par_1[size_par_1] __attribute__ ((aligned (64)));
-			
-			res = ioctl(fi->fh, cmd, &ioctl_par_1);
-			
-			if (size_par_1 != pwrite(proc_pid_mem_fd, &ioctl_par_1, size_par_1, addr_par_1)) {
-				DBG("cannot pwrite %zd bytes to %p in %s for ioctl %d, reason: %s\n",
-				    size_par_1, arg, proc_pid_mem_name, cmd, strerror(errno));
-				res = -EFAULT;
-				break;
-			}
-			
-			break;
-		}
-		
-		case TCSETS: {
-			off_t  addr_par_1 = (off_t)arg;
-			const size_t size_par_1 = 36; /* == real sizeof(struct termios) - not 44 bytes!  */
-			char ioctl_par_1[size_par_1] __attribute__ ((aligned (64)));
-			
-			if (size_par_1 != pread(proc_pid_mem_fd, &ioctl_par_1, size_par_1, addr_par_1)) {
-				res = -EFAULT;
-				DBG("cannot pread %zd bytes from %p in %s for ioctl %d, reason: %s\n",
-				    size_par_1, arg, proc_pid_mem_name, cmd, strerror(errno));
-				break;
-			}
-			
-			res = ioctl(fi->fh, cmd, &ioctl_par_1);
-			break;
-		}
 
-		case TIOCGSERIAL: {
-			off_t  addr_par_1 = (off_t)arg;
-			const size_t size_par_1 = 72; /* == sizeof(struct serial_struct)  */
-			char ioctl_par_1[size_par_1] __attribute__ ((aligned (64)));
+		{
+			off_t addr_par_1  = (off_t)arg;
+			size_t size_par_1 = 0;
+			int int_arg = 0; // used for some ioctl()s that pass an int directly, not a pointer
 			
-			res = ioctl(fi->fh, cmd, &ioctl_par_1);
-			
-			if (size_par_1 != pwrite(proc_pid_mem_fd, &ioctl_par_1, size_par_1, addr_par_1)) {
-				DBG("cannot pwrite %zd bytes to %p in %s for ioctl %d, reason: %s\n",
-				    size_par_1, arg, proc_pid_mem_name, cmd, strerror(errno));
-				res = -EFAULT;
-				break;
-			}
-			
-			break;
-		}
-		
-		case TIOCSSERIAL: {
-			off_t  addr_par_1 = (off_t)arg;
-			const size_t size_par_1 = 72; /* == sizeof(struct serial_struct)  */
-			char ioctl_par_1[size_par_1] __attribute__ ((aligned (64)));
-			
-			if (size_par_1 != pread(proc_pid_mem_fd, &ioctl_par_1, size_par_1, addr_par_1)) {
-				res = -EFAULT;
-				DBG("cannot pread %zd bytes from %p in %s for ioctl %d, reason: %s\n",
-				    size_par_1, arg, proc_pid_mem_name, cmd, strerror(errno));
-				break;
-			}
-			
-			res = ioctl(fi->fh, cmd, &ioctl_par_1);
-			break;
-		}
+			// If size_par_1 is set to a value > 0, the parameter memory will be copied in/out after the switch
+			switch (cmd) {
+				
+				case HCIGETCONNLIST: {
+					struct our_hci_conn_list_req cl;
+					const size_t so_cl = sizeof(cl);
+					
+					// read content of cl, as we need it to determine the size of the entire structure passed
+					if (so_cl != pread(proc_pid_mem_fd, &cl, so_cl, addr_par_1)) {
+						res = -EFAULT;
+						DBG("cannot pread %zd bytes for hci_conn_list_req from %p in %s for ioctl %d, reason: %s\n",
+					   	 size_par_1, arg, proc_pid_mem_name, cmd, strerror(errno));
+						close(proc_pid_mem_fd);
+						return res;
+					}
+					
+					/* 16 == sizeof(struct hci_conn_info) */ 
+					size_par_1 = cl.conn_num * 16 + sizeof(cl);
+					break;
+				}
+				
+				case HCIGETCONNINFO: {
+					size_par_1 = 24; // == 8 + 16 == sizeof(struct hci_conn_info_req) + sizeof(struct hci_conn_info)
+				}
+				
+				case HCIGETDEVINFO: {
+					size_par_1 = 92; // == sizeof(struct hci_dev_info)
+					break;
+				}
+				
+				case HCIGETDEVLIST: {
+					size_par_1 = 132; // == HCI_MAX_DEV * sizeof(hci_dev_req) + sizeof(hci_dev_list_req)
+					break;
+				}
+				
+				case TIOCGLCKTRMIOS:
+				case TIOCSLCKTRMIOS:
+				case TCSETSW:
+				case TCSETSF:
+				case TCGETS:
+				case TCSETS: {
+					size_par_1 = 36; /* == real sizeof(struct termios) - not 44 bytes!  */
+					break;
+				}
+				
+				case TIOCGSERIAL:
+				case TIOCSSERIAL: {
+					size_par_1 = 72; /* == sizeof(struct serial_struct)  */
+					break;
+				}
+				
+				case SIOCGIFFLAGS:
+				case SIOCSIFFLAGS:
+				case SIOCGIFADDR:
+				case SIOCSIFADDR:
+				case SIOCGIFDSTADDR:
+				case SIOCSIFDSTADDR:
+				case SIOCGIFBRDADDR:
+				case SIOCSIFBRDADDR:
+				case SIOCGIFNETMASK:
+				case SIOCSIFNETMASK:
+				case SIOCGIFMETRIC:
+				case SIOCSIFMETRIC:
+				case SIOCGIFMEM:
+				case SIOCSIFMEM:
+				case SIOCGIFMTU:
+				case SIOCSIFMTU:
+				case SIOCSIFHWADDR:
+				case SIOCADDMULTI:
+				case SIOCDELMULTI:
+				case SIOCGIFMAP:
+				case SIOCSIFMAP:
+				case SIOCGIFHWADDR: {
+					size_par_1 = 40;  /* sizeof(struct ifreq) */
+					break;
+				}
+				
+				case TIOCGWINSZ:
+				case TIOCSWINSZ: {
+					size_par_1 = 8;  /* sizeof(struct winsize) */
+					break;
+				}
+				
+				case TIOCMBIS:
+				case TIOCMBIC:
+				case TIOCOUTQ:
+				case TIOCMGET:
+				/* case TIOCINQ: - same as FIONREAD */
+				case FIONREAD: {
+					size_par_1 = sizeof(int);
+					break;
+				}	
 
-		case SIOCGIFHWADDR: {
-			off_t  addr_par_1 = (off_t)arg;
-			const size_t size_par_1 = 40;  /* sizeof(struct ifreq) */
-			char ioctl_par_1[size_par_1] __attribute__ ((aligned (64)));
-			
-			if (size_par_1 != pread(proc_pid_mem_fd, &ioctl_par_1, size_par_1, addr_par_1)) {
-				res = -EFAULT;
-				DBG("cannot pread %zd bytes from %p in %s for ioctl %d, reason: %s\n",
-				    size_par_1, arg, proc_pid_mem_name, cmd, strerror(errno));
-				break;
+				case TCFLSH:
+				case TCSBRK: {
+					// use "arg" as an int paramter to ioctl() directly, not a pointer
+					int_arg = (int)((long long)arg);			
+					break;
+				}
+				
+				case TIOCEXCL:
+				case TIOCNXCL: {
+					// no argument at all
+					break;
+				}
+				
+				default: {
+					/* IOCTL "cmd" is not yet supported here */
+					DBG("ioctl %d is not yet supported - feel free to enhance unionfs-fuse/src/fuse_ops.c\n", cmd); 
+					close(proc_pid_mem_fd);
+					return -ENOSYS;
+				}
 			}
 			
-			res = ioctl(fi->fh, cmd, &ioctl_par_1);
+			char ioctl_par_1[2048] __attribute__ ((aligned (64)));  // buffer for ioctl parameter 1
 			
-			if (size_par_1 != pwrite(proc_pid_mem_fd, &ioctl_par_1, size_par_1, addr_par_1)) {
-				DBG("cannot pwrite %zd bytes to %p in %s for ioctl %d, reason: %s\n",
-				    size_par_1, arg, proc_pid_mem_name, cmd, strerror(errno));
-				res = -EFAULT;
-				break;
+			if (size_par_1) {
+				// read ioctl_par_1 from the process that did the ioctl()
+				if (size_par_1 != pread(proc_pid_mem_fd, &ioctl_par_1, size_par_1, addr_par_1)) {
+					res = -EFAULT;
+					DBG("cannot pread %zd bytes from %p in %s for ioctl %d, reason: %s\n",
+					    size_par_1, arg, proc_pid_mem_name, cmd, strerror(errno));
+					close(proc_pid_mem_fd);
+					return res;
+				}
+				
+				res = ioctl(fi->fh, cmd, &ioctl_par_1);
+				if (res == -1) {
+					res = -errno;
+				}
+				
+				// write ioctl_par_1 to the process that did the ioctl()
+				if (size_par_1 != pwrite(proc_pid_mem_fd, &ioctl_par_1, size_par_1, addr_par_1)) {
+					DBG("cannot pwrite %zd bytes to %p in %s for ioctl %d, reason: %s\n",
+					    size_par_1, arg, proc_pid_mem_name, cmd, strerror(errno));
+					res = -EFAULT;
+				}
+			} else {
+				// size_par_1 == 0
+				res = ioctl(fi->fh, cmd, int_arg);
+				if (res == -1) {
+					res = -errno;
+				}
 			}
-			
-			break;
-		}
-		
-		case TIOCOUTQ:
-		case TIOCMGET:
-		/* case TIOCINQ: - same as FIONREAD */
-		case FIONREAD: {
-			off_t  addr_par_1 = (off_t)arg;
-			const size_t size_par_1 = sizeof(int);
-			char ioctl_par_1[size_par_1] __attribute__ ((aligned (64)));
-			
-			res = ioctl(fi->fh, cmd, &ioctl_par_1);
-			
-			if (size_par_1 != pwrite(proc_pid_mem_fd, &ioctl_par_1, size_par_1, addr_par_1)) {
-				DBG("cannot pwrite %zd bytes to %p in %s for ioctl %d, reason: %s\n",
-				    size_par_1, arg, proc_pid_mem_name, cmd, strerror(errno));
-				res = -EFAULT;
-				break;
-			}
-			
-			break;
-		}
-
-		case TIOCMBIS:
-		case TIOCMBIC: {
-			off_t  addr_par_1 = (off_t)arg;
-			const size_t size_par_1 = sizeof(int);
-			char ioctl_par_1[size_par_1] __attribute__ ((aligned (64)));
-			
-			if (size_par_1 != pread(proc_pid_mem_fd, &ioctl_par_1, size_par_1, addr_par_1)) {
-				res = -EFAULT;
-				DBG("cannot pread %zd bytes from %p in %s for ioctl %d, reason: %s\n",
-				    size_par_1, arg, proc_pid_mem_name, cmd, strerror(errno));
-				break;
-			}
-			
-			res = ioctl(fi->fh, cmd, &ioctl_par_1);
-			break;
-		}
-
-		case TCFLSH:
-		case TCSBRK: {
-			const int i = (int)((long long)arg);			
-			res = ioctl(fi->fh, cmd, i);
-			break;
-		}
-		
-		case TIOCEXCL:
-		case TIOCNXCL: {
-			res = ioctl(fi->fh, cmd);
-			break;
-		}
-		
-		default:
-			/* IOCTL "cmd" is not yet supported here */
-			DBG("ioctl %d is not yet supported - feel free to enhance unionfs-fuse/src/fuse_ops.c\n", cmd); 
 		}
 		
 		close(proc_pid_mem_fd);

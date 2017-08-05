@@ -46,7 +46,7 @@ extern int poll_observer_pipe[2];
 // if file descriptor X is to be observed for poll() notifications,
 //  poll_handle[X] will contain a fuse_pollhandle * for this - or a zero-pointer if not.
 extern struct fuse_pollhandle ** poll_handles;
-extern short * poll_revents; // what to poll() for, also used to convey result, same size as poll_handles
+extern short * poll_revents; // what to (still) poll() for, same size as poll_handles
 extern unsigned int poll_handles_size; // poll_handles is dynamically enlarged if required for a higher fd
 
 
